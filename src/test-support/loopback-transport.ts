@@ -70,6 +70,10 @@ export class LoopbackTransport extends EventEmitter implements TransportLike {
     /* loopback 无需发现 */
   }
 
+  startLanDiscovery(): void {
+    /* loopback 无需发现 */
+  }
+
   /** 内部: 收到来自某 peer 的字节，解码帧后分发给上层 */
   recvFrom(fromPk: string, chunk: Buffer): void {
     let dec = this.decoders.get(fromPk);

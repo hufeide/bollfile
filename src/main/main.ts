@@ -52,6 +52,7 @@ function setupIpc(): void {
   });
 
   ipcMain.handle('joinRoom', (_e, code: string) => boll?.joinRoom(code));
+  ipcMain.handle('startLan', (_e, code: string) => boll?.startLan(code));
   ipcMain.handle('getPublicKey', () => boll?.getPublicKey() || '');
   ipcMain.handle('getPeers', () => (boll ? boll.getPeers() : []));
   ipcMain.handle('sendMessage', (_e, pk: string, text: string) => boll?.sendMessage(pk, text));

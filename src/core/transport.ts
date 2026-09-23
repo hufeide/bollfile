@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import { encodeFrame, FrameDecoder } from './framing';
 import { loadOrCreateKeys } from './keys';
 import { startLocalBootstrap, LocalBootstrap } from './local-bootstrap';
+import { LanDiscovery } from './lan-discovery';
 
 export type DataHandler = (payload: Buffer, fromPk: string) => void;
 
@@ -21,6 +22,8 @@ export class HyperswarmTransport extends EventEmitter {
   private bootstrap?: any;
   private useLocalBootstrap: boolean;
   private localBootstrap?: LocalBootstrap;
+  private lan?: LanDiscovery;
+  private lanTried = new Set<string>();
   private conns = new Map<string, any>();
   private dataHandlers: DataHandler[] = [];
   private myPk = '';
@@ -41,6 +44,12 @@ export class HyperswarmTransport extends EventEmitter {
     // 本地 DHT bootstrap: 优先用显式 bootstrap, 否则起一个本地离线节点
     if (this.bootstrap) {
       swarmOpts.bootstrap = this.bootstrap;
+    } else if (process.env.BOLLFIlE_BOOTSTRAP) {
+      // 可指定可达的 DHT bootstrap (公网默认节点不可达时, 指向自建/可达节点)
+      swarmOpts.bootstrap = process.env.BOLLFIlE_BOOTSTRAP.split(',').map((s) => {
+        const [host, port] = s.trim().split(':');
+        return { host, port: Number(port) };
+      });
     } else if (this.useLocalBootstrap) {
       this.localBootstrap = await startLocalBootstrap();
       swarmOpts.bootstrap = [this.localBootstrap.address];
@@ -75,6 +84,7 @@ export class HyperswarmTransport extends EventEmitter {
     });
     conn.on('close', () => {
       this.conns.delete(pk);
+      this.lanTried.delete(pk); // 允许掉线后重新发现并直连
       this.emit('peer-offline', pk);
     });
     conn.on('error', () => {
@@ -84,11 +94,44 @@ export class HyperswarmTransport extends EventEmitter {
     this.emit('peer', pk);
   }
 
-  /** 加入房间: 房间码 → sha256 → 私密 topic，DHT 自动撮合 */
+  /** 加入房间: 房间码 → sha256 → 私密 topic，DHT 自动撮合(公网) */
   joinRoom(roomCode: string): void {
     if (!this.swarm) throw new Error('transport not started');
     const topic = crypto.createHash('sha256').update(roomCode).digest().subarray(0, 16);
     this.swarm.join(topic, { server: true, client: true });
+  }
+
+  /**
+   * 局域网补充发现: 同网段机器通过多播拿到对方 LAN 地址后, 直接用 hyperdht 对指定地址握手直连,
+   * 绕过 NAT 回环 (hairpin) 与公共 DHT。与 joinRoom(DHT) 互补: 公网走 DHT、局域网走这里。
+   */
+  startLanDiscovery(roomCode: string): void {
+    if (!this.swarm) return;
+    let port: number | undefined;
+    try {
+      const a = (this.swarm as any).server?.address?.();
+      port = a && a.port;
+    } catch {
+      /* ignore */
+    }
+    if (!port) return;
+    this.lan = new LanDiscovery((peer) => {
+      const key = peer.pk;
+      if (this.lanTried.has(key) || this.conns.has(key)) return; // 已尝试/已连, 不重复
+      this.lanTried.add(key);
+      try {
+        // 对指定 LAN 地址直接握手 (relayAddresses 即直连目标), 无需公共 DHT
+        const conn = (this.swarm as any).dht.connect(Buffer.from(key, 'hex'), {
+          keyPair: (this.swarm as any).keyPair,
+          relayAddresses: [{ host: peer.host, port: peer.port }],
+        });
+        conn.on('error', () => this.lanTried.delete(key));
+        conn.on('close', () => this.lanTried.delete(key));
+      } catch {
+        this.lanTried.delete(key);
+      }
+    });
+    this.lan.start(roomCode, port, this.myPk);
   }
 
   onData(h: DataHandler): void {
@@ -161,6 +204,10 @@ export class HyperswarmTransport extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    if (this.lan) {
+      this.lan.stop();
+      this.lan = undefined;
+    }
     if (this.swarm) await this.swarm.destroy();
     this.swarm = null;
     this.started = false;

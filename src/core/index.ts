@@ -20,6 +20,7 @@ export interface TransportLike {
   getConnectionCount(): number;
   on(event: string, listener: (...args: any[]) => void): any;
   joinRoom(code: string): void;
+  startLanDiscovery(code: string): void;
   start(): Promise<string>;
   stop(): Promise<void>;
 }
@@ -90,6 +91,11 @@ export class BollFileApp extends EventEmitter {
 
   joinRoom(code: string): void {
     this.transport.joinRoom(code);
+  }
+
+  /** 启动局域网多播发现(同网段直连, 与 DHT 互补) */
+  startLan(code: string): void {
+    this.transport.startLanDiscovery(code);
   }
 
   setName(name: string): void {

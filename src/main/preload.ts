@@ -6,6 +6,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   start: (role: string, name: string) => ipcRenderer.invoke('start', role, name),
   joinRoom: (code: string) => ipcRenderer.invoke('joinRoom', code),
+  startLan: (code: string) => ipcRenderer.invoke('startLan', code),
   getPublicKey: () => ipcRenderer.invoke('getPublicKey'),
   getPeers: () => ipcRenderer.invoke('getPeers'),
   sendMessage: (pk: string, text: string) => ipcRenderer.invoke('sendMessage', pk, text),

@@ -125,6 +125,7 @@ export function App(): JSX.Element {
       const pk = await api.start(role.trim() || 'default', name.trim() || '我');
       setMyPk(pk);
       await api.joinRoom(room.trim());
+      await api.startLan(room.trim());
       setStatus('');
       setScreen('app');
     } catch (e: any) {
