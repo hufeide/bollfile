@@ -1,0 +1,26 @@
+{
+  "name": "bollfile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && esbuild src/renderer/main.tsx --bundle --format=iife --jsx=automatic --outfile=dist/renderer/renderer.js && node -e \"require('fs').cpSync('src/renderer/index.html','dist/renderer/index.html')\"",
+    "start": "electron .",
+    "dev": "npm run build && electron .",
+    "cli": "npm run build && node dist/cli.js",
+    "test": "tsc -p tsconfig.json && node --test dist/test/"
+  },
+  "dependencies": {
+    "dht-rpc": "^6.27.0",
+    "hyperswarm": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "electron": "^30.5.1",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.0"
+  }
+}
