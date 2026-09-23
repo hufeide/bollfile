@@ -9,10 +9,14 @@
 import Hyperswarm from 'hyperswarm';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
+import * as net from 'net';
 import { encodeFrame, FrameDecoder } from './framing';
 import { loadOrCreateKeys } from './keys';
 import { startLocalBootstrap, LocalBootstrap } from './local-bootstrap';
 import { LanDiscovery } from './lan-discovery';
+
+/** 局域网直连固定 TCP 端口 (比 hyperswarm 随机 UDP 端口更不易被防火墙挡) */
+const TCP_PORT = Number(process.env.BOLLFIlE_TCP_PORT) || 8090;
 
 export type DataHandler = (payload: Buffer, fromPk: string) => void;
 
@@ -24,6 +28,8 @@ export class HyperswarmTransport extends EventEmitter {
   private localBootstrap?: LocalBootstrap;
   private lan?: LanDiscovery;
   private lanTried = new Set<string>();
+  private tcpServer?: net.Server;
+  private tcpPort = TCP_PORT;
   private conns = new Map<string, any>();
   private dataHandlers: DataHandler[] = [];
   private myPk = '';
@@ -65,6 +71,26 @@ export class HyperswarmTransport extends EventEmitter {
     });
 
     await this.swarm.listen();
+
+    // 局域网直连 TCP 服务: 固定端口(默认 8090), 比 hyperswarm 随机 UDP 端口更不易被防火墙挡。
+    // 若固定端口被占用(同机多实例/测试), 退回临时端口, 真实端口会通过多播广播通告给对方。
+    this.tcpServer = net.createServer((socket) => this.onTcpConnection(socket));
+    await new Promise<void>((resolve, reject) => {
+      const onErr = (e: any) => {
+        if (e && e.code === 'EADDRINUSE' && this.tcpPort !== 0) {
+          this.tcpPort = 0;
+          this.tcpServer!.removeListener('error', onErr);
+          this.tcpServer!.listen(0, '0.0.0.0', () => resolve());
+        } else {
+          reject(e);
+        }
+      };
+      this.tcpServer!.on('error', onErr);
+      this.tcpServer!.listen(this.tcpPort, '0.0.0.0', () => resolve());
+    });
+    this.tcpPort = (this.tcpServer!.address() as net.AddressInfo).port;
+    console.log(`[bollfile] 局域网直连 TCP 端口已监听: ${this.tcpPort}`);
+
     this.started = true;
     this.emit('ready', this.myPk);
     return this.myPk;
@@ -102,36 +128,93 @@ export class HyperswarmTransport extends EventEmitter {
   }
 
   /**
-   * 局域网补充发现: 同网段机器通过多播拿到对方 LAN 地址后, 直接用 hyperdht 对指定地址握手直连,
-   * 绕过 NAT 回环 (hairpin) 与公共 DHT。与 joinRoom(DHT) 互补: 公网走 DHT、局域网走这里。
+   * 局域网补充发现: 同网段机器通过多播拿到对方 LAN 地址后, 直接用固定 TCP 端口直连,
+   * 绕过 NAT 回环 (hairpin) 与公共 DHT, 也避开 hyperswarm 随机 UDP 端口被防火墙挡的问题。
+   * 与 joinRoom(DHT) 互补: 公网走 DHT、局域网走这里。
    */
   startLanDiscovery(roomCode: string): void {
-    if (!this.swarm) return;
-    let port: number | undefined;
-    try {
-      const a = (this.swarm as any).server?.address?.();
-      port = a && a.port;
-    } catch {
-      /* ignore */
-    }
-    if (!port) return;
     this.lan = new LanDiscovery((peer) => {
-      const key = peer.pk;
-      if (this.lanTried.has(key) || this.conns.has(key)) return; // 已尝试/已连, 不重复
-      this.lanTried.add(key);
-      try {
-        // 对指定 LAN 地址直接握手 (relayAddresses 即直连目标), 无需公共 DHT
-        const conn = (this.swarm as any).dht.connect(Buffer.from(key, 'hex'), {
-          keyPair: (this.swarm as any).keyPair,
-          relayAddresses: [{ host: peer.host, port: peer.port }],
-        });
-        conn.on('error', () => this.lanTried.delete(key));
-        conn.on('close', () => this.lanTried.delete(key));
-      } catch {
-        this.lanTried.delete(key);
+      this.dialTcpPeer(peer);
+    });
+    // 向局域网广播"我的 TCP 直连端口", 让对方来连 (固定端口更易被放行)
+    this.lan.start(roomCode, this.tcpPort, this.myPk);
+  }
+
+  /** 通过固定 TCP 端口直连一个局域网 peer (发现层拿到 host/port 后调用) */
+  private dialTcpPeer(peer: { host: string; port: number; pk: string }): void {
+    const key = peer.pk;
+    if (!key || key === this.myPk) return;
+    if (this.lanTried.has(key) || this.conns.has(key)) return; // 已尝试/已连, 不重复
+    this.lanTried.add(key);
+    const socket = net.connect(Number(peer.port), peer.host, () => {
+      // 连接建立后先发握手帧(携带本端 pk), 再注册(触发 presence)
+      socket.write(encodeFrame(Buffer.from(JSON.stringify({ t: 'pk', pk: this.myPk }))));
+      if (this.conns.has(key)) { socket.destroy(); return; } // 已被对方拨入抢先注册, 丢弃重复
+      this.conns.set(key, socket);
+      this.emit('peer', key);
+    });
+    socket.on('error', () => this.lanTried.delete(key));
+    this.setupTcp(key, socket);
+  }
+
+  /** 收到入站 TCP 连接: 先读首帧拿到对方 pk, 再挂帧解码器 */
+  private onTcpConnection(socket: net.Socket): void {
+    this.setupTcp(null, socket);
+  }
+
+  /**
+   * 统一处理一条 TCP 连接的帧: 首帧必为握手帧 {t:'pk',pk}, 之后才是协议帧。
+   * pkKnown 非空表示本端是拨号方(已知对方 pk), 首帧是对方的握手帧须跳过;
+   * pkKnown 为空表示本端是被拨方, 需从首帧解析出 pk。
+   */
+  private setupTcp(pkKnown: string | null, socket: net.Socket): void {
+    const decoder = new FrameDecoder();
+    let firstDone = false;
+    socket.on('data', (chunk: Buffer) => {
+      const frames = decoder.push(chunk);
+      for (const f of frames) {
+        if (!firstDone) {
+          firstDone = true;
+          if (pkKnown) {
+            continue; // 拨号方: 对方握手帧, 忽略
+          }
+          // 被拨方: 从首帧解析 pk
+          try {
+            const h = JSON.parse(f.toString('utf-8'));
+            if (h && h.t === 'pk' && typeof h.pk === 'string') {
+              const pk: string = h.pk;
+              pkKnown = pk;
+              if (this.conns.has(pk)) { socket.destroy(); return; } // 重复, 丢弃
+              this.lanTried.add(pk);
+              this.conns.set(pk, socket);
+              // 回礼握手帧, 让对方也跳过其首帧
+              socket.write(encodeFrame(Buffer.from(JSON.stringify({ t: 'pk', pk: this.myPk }))));
+              this.emit('peer', pk);
+              continue;
+            }
+          } catch {
+            /* ignore */
+          }
+          socket.destroy();
+          return;
+        }
+        const pk = pkKnown;
+        if (pk) {
+          for (const h of this.dataHandlers) h(f, pk);
+          this.emit('data', f, pk);
+        }
       }
     });
-    this.lan.start(roomCode, port, this.myPk);
+    socket.on('close', () => {
+      if (pkKnown) {
+        this.conns.delete(pkKnown);
+        this.lanTried.delete(pkKnown); // 允许掉线后重新发现并直连
+        this.emit('peer-offline', pkKnown);
+      }
+    });
+    socket.on('error', () => {
+      if (pkKnown) this.lanTried.delete(pkKnown);
+    });
   }
 
   onData(h: DataHandler): void {
@@ -207,6 +290,10 @@ export class HyperswarmTransport extends EventEmitter {
     if (this.lan) {
       this.lan.stop();
       this.lan = undefined;
+    }
+    if (this.tcpServer) {
+      await new Promise<void>((resolve) => this.tcpServer!.close(() => resolve()));
+      this.tcpServer = undefined;
     }
     if (this.swarm) await this.swarm.destroy();
     this.swarm = null;
