@@ -8,7 +8,8 @@
     "start": "electron .",
     "dev": "npm run build && electron .",
     "cli": "npm run build && node dist/cli.js",
-    "test": "tsc -p tsconfig.json && node --test dist/test/"
+    "test": "tsc -p tsconfig.json && node --test dist/test/",
+    "pack:win": "npm run build && electron-builder --win --x64"
   },
   "dependencies": {
     "dht-rpc": "^6.27.0",
@@ -20,7 +21,26 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "electron": "^30.5.1",
+    "electron-builder": "^24.13.3",
     "esbuild": "^0.21.5",
     "typescript": "^5.4.0"
+  },
+  "build": {
+    "appId": "com.bollfile.app",
+    "productName": "bollfile",
+    "copyright": "Copyright © 2026 bollfile",
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "!dist/test/**",
+      "!dist/test-support/**"
+    ],
+    "asarUnpack": ["**/*.node", "**/prebuilds/**"],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": ["zip", "dir"]
+    }
   }
 }
