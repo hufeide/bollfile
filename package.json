@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && esbuild src/renderer/main.tsx --bundle --format=iife --jsx=automatic --outfile=dist/renderer/renderer.js && node -e \"require('fs').cpSync('src/renderer/index.html','dist/renderer/index.html')\"",
+    "build": "tsc -p tsconfig.json && esbuild src/renderer/main.tsx --bundle --format=iife --jsx=automatic --outfile=dist/renderer/renderer.js && node -e \"const fs=require('fs');fs.mkdirSync('dist/renderer',{recursive:true});fs.cpSync('src/renderer/index.html','dist/renderer/index.html');fs.cpSync('src/renderer/fonts','dist/renderer/fonts',{recursive:true});\"",
     "start": "electron .",
     "dev": "npm run build && electron .",
     "cli": "npm run build && node dist/cli.js",
